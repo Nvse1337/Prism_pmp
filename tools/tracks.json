@@ -1,0 +1,146 @@
+[
+  {
+    "slug": "neon-bloom",
+    "title": "Neon Bloom",
+    "artist": "PRISM Sessions",
+    "album": "Particle Studies",
+    "src": "assets/audio/neon-bloom.mp3",
+    "cover": "assets/covers/neon-bloom.jpg",
+    "duration": 70.45,
+    "bpm": 88,
+    "palette": [
+      "#54e7ff",
+      "#ff7ad9",
+      "#ffd59a"
+    ],
+    "cues": [
+      {
+        "bar": 0,
+        "time": 0.0,
+        "label": "intro"
+      },
+      {
+        "bar": 4,
+        "time": 10.91,
+        "label": "build"
+      },
+      {
+        "bar": 8,
+        "time": 21.82,
+        "label": "peak"
+      },
+      {
+        "bar": 12,
+        "time": 32.73,
+        "label": "peak"
+      },
+      {
+        "bar": 16,
+        "time": 43.64,
+        "label": "peak"
+      },
+      {
+        "bar": 20,
+        "time": 54.55,
+        "label": "peak"
+      }
+    ],
+    "rms": 0.2418
+  },
+  {
+    "slug": "low-orbit",
+    "title": "Low Orbit",
+    "artist": "PRISM Sessions",
+    "album": "Particle Studies",
+    "src": "assets/audio/low-orbit.mp3",
+    "cover": "assets/covers/low-orbit.jpg",
+    "duration": 70.86,
+    "bpm": 74,
+    "palette": [
+      "#79a7ff",
+      "#c07bff",
+      "#67ffe0"
+    ],
+    "cues": [
+      {
+        "bar": 0,
+        "time": 0.0,
+        "label": "intro"
+      },
+      {
+        "bar": 4,
+        "time": 12.97,
+        "label": "build"
+      },
+      {
+        "bar": 8,
+        "time": 25.95,
+        "label": "peak"
+      },
+      {
+        "bar": 12,
+        "time": 38.92,
+        "label": "peak"
+      },
+      {
+        "bar": 16,
+        "time": 51.89,
+        "label": "peak"
+      }
+    ],
+    "rms": 0.2539
+  },
+  {
+    "slug": "glass-horizon",
+    "title": "Glass Horizon",
+    "artist": "PRISM Sessions",
+    "album": "Particle Studies",
+    "src": "assets/audio/glass-horizon.mp3",
+    "cover": "assets/covers/glass-horizon.jpg",
+    "duration": 67.67,
+    "bpm": 98,
+    "palette": [
+      "#ffd27a",
+      "#ff8f6b",
+      "#7ee8ff"
+    ],
+    "cues": [
+      {
+        "bar": 0,
+        "time": 0.0,
+        "label": "intro"
+      },
+      {
+        "bar": 4,
+        "time": 9.8,
+        "label": "build"
+      },
+      {
+        "bar": 8,
+        "time": 19.59,
+        "label": "peak"
+      },
+      {
+        "bar": 12,
+        "time": 29.39,
+        "label": "peak"
+      },
+      {
+        "bar": 16,
+        "time": 39.18,
+        "label": "peak"
+      },
+      {
+        "bar": 20,
+        "time": 48.98,
+        "label": "peak"
+      },
+      {
+        "bar": 24,
+        "time": 58.78,
+        "label": "peak"
+      }
+    ],
+    "rms": 0.2364
+  }
+]

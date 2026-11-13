@@ -1,0 +1,18 @@
+{
+  "name": "prism-particle-player",
+  "productName": "PRISM",
+  "version": "1.2.0",
+  "description": "PRISM — a local particle music player",
+  "main": "electron/main.js",
+  "private": true,
+  "author": "PRISM",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "pack:win": "node scripts/pack.js"
+  },
+  "devDependencies": {
+    "@electron/packager": "20.3.0",
+    "electron": "45.3.1"
+  }
+}

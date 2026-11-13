@@ -1,0 +1,7 @@
+node_modules/
+release/
+.electron-cache/
+.tmp/
+electron-boot.log
+electron-test.*.log
+.tmp-electron-*.mjs
