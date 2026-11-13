@@ -1,7 +1,7 @@
 {
   "name": "prism-particle-player",
   "productName": "PRISM",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "PRISM — a local particle music player",
   "main": "electron/main.js",
   "private": true,

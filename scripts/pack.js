@@ -6,6 +6,7 @@ const { packager } = require("@electron/packager");
 
 const root = path.resolve(__dirname, "..");
 const release = path.join(root, "release");
+const pkg = require(path.join(root, "package.json"));
 
 async function main() {
   fs.mkdirSync(release, { recursive: true });
@@ -19,8 +20,8 @@ async function main() {
     icon: path.join(root, "assets", "prism.ico"),
     asar: false,
     prune: true,
-    appVersion: "1.0.0",
-    buildVersion: "1.0.0",
+    appVersion: pkg.version,
+    buildVersion: pkg.version,
     appCopyright: "Copyright © 2026 PRISM",
     ignore: [
       /^\/release($|\/)/,
