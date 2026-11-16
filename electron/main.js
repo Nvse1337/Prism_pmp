@@ -14,6 +14,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const covers = require("./covers");
+const lyrics = require("./lyrics");
 
 app.setName("PRISM");
 app.setAppUserModelId("com.prism.particleplayer");
@@ -321,85 +322,15 @@ ipcMain.handle("prism:search-lyrics", async (event, payload) => {
   if (!mainWindow || event.sender !== mainWindow.webContents) {
     return { ok: false, error: "unauthorized" };
   }
-  const title = String((payload && payload.title) || "").trim().slice(0, 100);
-  const artist = String((payload && payload.artist) || "").trim().slice(0, 80);
-  const duration = Number((payload && payload.duration) || 0);
-  if (!title) return { ok: false, error: "请输入歌名" };
-
-  const params = new URLSearchParams({ track_name: title });
-  if (artist) params.set("artist_name", artist);
-
-  let response;
   try {
-    response = await fetch("https://lrclib.net/api/search?" + params.toString(), {
-      headers: {
-        Accept: "application/json",
-        "User-Agent": "PRISM/1.2 (https://github.com/Nvse1337/Prism_pmp)",
-      },
-      signal: AbortSignal.timeout(20000),
-    });
-  } catch (_) {
-    return { ok: false, error: "无法连接歌词服务，请检查网络" };
+    const result = await lyrics.searchLyrics(payload || {});
+    return { ok: true, result };
+  } catch (err) {
+    return {
+      ok: false,
+      error: (err && err.friendly && err.message) || "歌词搜索失败，请稍后重试",
+    };
   }
-  if (!response.ok) {
-    if (response.status === 429) return { ok: false, error: "歌词搜索请求过多，请稍后再试" };
-    return { ok: false, error: "歌词服务返回 HTTP " + response.status };
-  }
-
-  let results;
-  try {
-    results = await response.json();
-  } catch (_) {
-    return { ok: false, error: "歌词服务返回数据无法读取" };
-  }
-  if (!Array.isArray(results) || !results.length) return { ok: true, result: null };
-
-  const normalize = (value) =>
-    String(value || "")
-      .toLowerCase()
-      .normalize("NFKD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .replace(/\([^)]*\)|\[[^\]]*\]/g, " ")
-      .replace(/[^\p{L}\p{N}]+/gu, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-
-  const wantedTitle = normalize(title);
-  const wantedArtist = normalize(artist);
-  const scored = results
-    .filter((item) => item && (item.syncedLyrics || item.plainLyrics || item.instrumental))
-    .map((item) => {
-      const itemTitle = normalize(item.trackName);
-      const itemArtist = normalize(item.artistName);
-      let score = 0;
-      if (itemTitle === wantedTitle) score += 10;
-      else if (itemTitle.includes(wantedTitle) || wantedTitle.includes(itemTitle)) score += 5;
-      if (wantedArtist) {
-        if (itemArtist === wantedArtist) score += 8;
-        else if (itemArtist.includes(wantedArtist) || wantedArtist.includes(itemArtist)) score += 3;
-      }
-      if (item.syncedLyrics) score += 5;
-      if (duration > 0 && Number.isFinite(Number(item.duration))) {
-        score += Math.max(0, 4 - Math.abs(Number(item.duration) - duration) / 5);
-      }
-      return { item, score };
-    })
-    .sort((a, b) => b.score - a.score);
-
-  if (!scored.length) return { ok: true, result: null };
-  const best = scored[0].item;
-  return {
-    ok: true,
-    result: {
-      trackName: String(best.trackName || "").slice(0, 120),
-      artistName: String(best.artistName || "").slice(0, 100),
-      albumName: String(best.albumName || "").slice(0, 120),
-      duration: Number(best.duration) || 0,
-      instrumental: best.instrumental === true,
-      syncedLyrics: String(best.syncedLyrics || "").slice(0, 1024 * 1024),
-      plainLyrics: String(best.plainLyrics || "").slice(0, 1024 * 1024),
-    },
-  };
 });
 
 ipcMain.handle("prism:translate-lyrics", async (event, payload) => {
@@ -496,10 +427,33 @@ ipcMain.handle("prism:save-playlist", async (event, payload) => {
         .map((value) => path.resolve(value))
     : [];
   const unique = [...new Set(folders)];
+  const tracks = Array.isArray(payload && payload.tracks)
+    ? payload.tracks
+        .filter((item) => item && typeof item.filePath === "string" && item.filePath.trim())
+        .slice(0, 20000)
+        .map((item) => ({
+          filePath: path.resolve(item.filePath),
+          title: String(item.title || ""),
+          artist: String(item.artist || ""),
+          album: String(item.album || ""),
+          folder: String(item.folder || ""),
+          folderPath: item.folderPath ? path.resolve(item.folderPath) : "",
+          relativeFolder: String(item.relativeFolder || ""),
+          duration: Number(item.duration) || 0,
+        }))
+    : [];
+  const current = payload && payload.current && typeof payload.current.filePath === "string"
+    ? {
+        filePath: path.resolve(payload.current.filePath),
+        title: String(payload.current.title || ""),
+      }
+    : null;
   const data = {
-    version: 1,
+    version: 2,
     savedAt: new Date().toISOString(),
     folders: unique,
+    tracks,
+    current,
   };
 
   try {
@@ -512,7 +466,7 @@ ipcMain.handle("prism:save-playlist", async (event, payload) => {
       await fs.copyFile(temp, PLAYLIST_FILE);
       await fs.rm(temp, { force: true });
     }
-    return { ok: true, count: unique.length, savedAt: data.savedAt };
+    return { ok: true, count: tracks.length, folders: unique.length, savedAt: data.savedAt };
   } catch (error) {
     return { ok: false, error: String(error && error.message ? error.message : error) };
   }
@@ -536,6 +490,46 @@ ipcMain.handle("prism:restore-playlist", async (event) => {
   const folders = [];
   const missingFolders = [];
 
+  // Version 2 stores the exact track list, so tracks removed from the queue
+  // never come back after a restart. Version 1 only stored folders and has to
+  // be re-scanned for backwards compatibility.
+  if (Array.isArray(data.tracks)) {
+    const tracks = [];
+    const missing = [];
+    for (const item of data.tracks) {
+      if (!item || typeof item.filePath !== "string" || !item.filePath.trim()) continue;
+      const filePath = path.resolve(item.filePath);
+      try {
+        const stat = await fs.stat(filePath);
+        if (!stat.isFile()) throw new Error("not a file");
+      } catch (_) {
+        missing.push(filePath);
+        continue;
+      }
+      tracks.push({
+        path: filePath,
+        url: pathToFileURL(filePath).href,
+        name: path.basename(filePath),
+        title: String(item.title || ""),
+        artist: String(item.artist || ""),
+        album: String(item.album || ""),
+        folder: String(item.folder || (item.folderPath ? path.basename(item.folderPath) : "")),
+        folderPath: item.folderPath || "",
+        relativeFolder: String(item.relativeFolder || ""),
+        duration: Number(item.duration) || 0,
+      });
+    }
+    return {
+      ok: true,
+      saved: true,
+      version: 2,
+      savedAt: data.savedAt || null,
+      tracks,
+      missing,
+      current: data.current && typeof data.current.filePath === "string" ? data.current : null,
+    };
+  }
+
   for (const root of roots) {
     try {
       const stat = await fs.stat(root);
@@ -556,6 +550,7 @@ ipcMain.handle("prism:restore-playlist", async (event) => {
   return {
     ok: true,
     saved: true,
+    version: 1,
     savedAt: data.savedAt || null,
     folders,
     missingFolders,

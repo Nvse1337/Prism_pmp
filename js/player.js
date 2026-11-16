@@ -9,6 +9,9 @@
   const $ = (id) => document.getElementById(id);
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
   const pad2 = (n) => String(n).padStart(2, "0");
+  // Slight lead so a line is readable right as the vocal starts; per-song
+  // offset from the lyrics panel is applied on top of this.
+  const LYRIC_LEAD = 0.15;
 
   /* Curated from Color Hunt's "Most Popular" feed (colorhunt.co/palettes/popular).
      `colors` keeps the original four swatches; `accent` is the UI/particle order. */
@@ -370,6 +373,7 @@
       this.lyricsSearchBusy = false;
       this.albumWallOpen = false;
       this.lyricsSettings = this.loadLyricsSettings();
+      this.lyricsOffsets = this.loadLyricsOffsets();
       this.lyricsMap = this.loadLyricsMap();
       this.lyricsTranslations = this.loadLyricsTranslations();
       this.currentLyrics = [];
@@ -377,6 +381,8 @@
       this.translationBusy = false;
       this.lyricsActive = -1;
       this.lyricsDrag = null;
+      this.lyricsSyncRaf = 0;
+      this._lyricsSync = this._lyricsSync.bind(this);
       this.albumDragIndex = -1;
       this.albumJustDragged = false;
       this.albumPreviewOrder = null;
@@ -384,6 +390,8 @@
       this.albumHoverCell = -1;
       this.albumCellSize = null;
       this.albumGridOrigin = null;
+      this.queuePointerState = null;
+      this.queueJustDragged = false;
       this.todos = this.loadTodos();
       this.dragDepth = 0;
       this.knobDrag = null;
@@ -429,10 +437,12 @@
       this.durationCacheTimer = 0;
       this.durationHydrationToken = 0;
       this.customBackgrounds = this.loadCustomBackgrounds();
+      this.rippleEnabled = storeGet("prism.ripple", "on") !== "off";
       this.field = new window.PRISM.ParticleField($("particleCanvas"));
       this.field.setMotion(this.settings.motion / 100);
       this.field.setDensity(this.settings.density);
       this.field.setShape(this.settings.shape);
+      this.field.setRippleEnabled(this.rippleEnabled);
       this.sphereSettings = this.loadSphereSettings();
       this.sphere = null;
       if (window.PRISM && window.PRISM.ParticleSphere3D) {
@@ -449,6 +459,7 @@
       this.cacheDom();
       this.el.app.classList.add("is-intro");
       this.bind();
+      this.syncRippleUI();
       this.backgrounds.show(0, { immediate: true });
       this.renderWelcome();
       this.applyShuffleUI();
@@ -474,7 +485,7 @@
       this.applyLyricsSettings();
       this.applySphereSettings();
       if (this.sphere) this.sphere.setCamera(this.sphereSettings.camera, { immediate: true });
-      this.selectTrack(0, { autoplay: false, first: true });
+      this.selectTrack(0, { autoplay: false, first: true, remember: false });
       this.renderQueue();
       this.setStatus("standby");
       this.handleUrlModes();
@@ -522,6 +533,8 @@
         lyricsLineCountValue: $("lyricsLineCountValue"),
         lyricsOpacity: $("lyricsOpacity"),
         lyricsOpacityValue: $("lyricsOpacityValue"),
+        lyricsOffset: $("lyricsOffset"),
+        lyricsOffsetValue: $("lyricsOffsetValue"),
         lyricsReset: $("lyricsReset"),
         lyricsClear: $("lyricsClear"),
         lyricsInput: $("lyricsInput"),
@@ -648,6 +661,7 @@
         sphereBlock: $("sphereBlock"),
         sphereToggle: $("sphereToggle"),
         sphereStatus: $("sphereStatus"),
+        rippleToggle: $("rippleToggle"),
         sphereCameras: $("sphereCameras"),
         sphereAuto: $("sphereAuto"),
         sphereSensitivity: $("sphereSensitivity"),
@@ -687,6 +701,9 @@
       this.el.scrim.addEventListener("click", () => this.toggleQueue(false));
       this.el.settingsBtn.addEventListener("click", () => this.toggleSettings());
       this.el.settingsClose.addEventListener("click", () => this.toggleSettings(false));
+      if (this.el.rippleToggle) {
+        this.el.rippleToggle.addEventListener("click", () => this.setRippleEnabled(!this.rippleEnabled));
+      }
       this.el.bgSettingsBtn.addEventListener("click", () => this.toggleBackgroundSettings());
       this.el.bgSettingsClose.addEventListener("click", () => this.toggleBackgroundSettings(false));
       this.el.uiScaleBtn.addEventListener("click", () => this.toggleUiScalePop());
@@ -726,6 +743,12 @@
       this.el.lyricsSize.addEventListener("input", () => this.setLyricsSize(this.el.lyricsSize.value));
       this.el.lyricsLineCount.addEventListener("input", () => this.setLyricsLineCount(this.el.lyricsLineCount.value));
       this.el.lyricsOpacity.addEventListener("input", () => this.setLyricsOpacity(this.el.lyricsOpacity.value));
+      if (this.el.lyricsOffset) {
+        this.el.lyricsOffset.addEventListener("input", () => this.setLyricsOffset(this.el.lyricsOffset.value));
+        // Avoid Chromium starting a native text/label drag (the ghost image
+        // that otherwise appears while grabbing the slider thumb).
+        this.el.lyricsOffset.addEventListener("dragstart", (e) => e.preventDefault());
+      }
       this.el.lyricsReset.addEventListener("click", () => this.resetLyricsPosition());
       this.el.lyricsClear.addEventListener("click", () => this.clearCurrentLyrics());
       this.el.lyricsOverlay.addEventListener("pointerdown", (e) => this.startLyricsDrag(e));
@@ -733,14 +756,14 @@
       window.addEventListener("pointerup", (e) => this.endLyricsDrag(e));
       this.el.albumViewBtn.addEventListener("click", () => this.openAlbumWall());
       this.el.albumWallClose.addEventListener("click", () => this.closeAlbumWall());
-      this.el.albumGrid.addEventListener("dragstart", (e) => this.onAlbumDragStart(e));
-      this.el.albumGrid.addEventListener("dragover", (e) => this.onAlbumDragOver(e));
-      this.el.albumGrid.addEventListener("dragleave", (e) => this.onAlbumDragLeave(e));
-      this.el.albumGrid.addEventListener("drop", (e) => this.onAlbumDrop(e));
-      this.el.albumGrid.addEventListener("dragend", () => this.clearAlbumDrag());
-      document.addEventListener("dragover", (e) => this.onAlbumPageDragOver(e));
-      document.addEventListener("drop", (e) => this.onAlbumPageDrop(e));
-      document.addEventListener("dragend", () => this.clearAlbumDeleteEdge());
+      this.el.albumGrid.addEventListener("pointerdown", (e) => this.onAlbumPointerDown(e));
+      window.addEventListener("pointermove", (e) => this.onAlbumPointerMove(e));
+      window.addEventListener("pointerup", (e) => this.onAlbumPointerUp(e));
+      window.addEventListener("pointercancel", (e) => this.onAlbumPointerCancel(e));
+      this.el.queueList.addEventListener("pointerdown", (e) => this.onQueuePointerDown(e));
+      window.addEventListener("pointermove", (e) => this.onQueuePointerMove(e));
+      window.addEventListener("pointerup", (e) => this.onQueuePointerUp(e));
+      window.addEventListener("pointercancel", (e) => this.onQueuePointerCancel(e));
       this.el.albumGrid.addEventListener("click", (e) => this.onAlbumCardClick(e));
       document.addEventListener("pointerdown", (e) => {
         if (!this.uiScalePopOpen && !this.fontColorPopOpen && !this.lyricsPopOpen) return;
@@ -1480,6 +1503,29 @@
       });
     }
 
+    syncRippleUI() {
+      if (!this.el || !this.el.rippleToggle) return;
+      const on = Boolean(this.rippleEnabled);
+      this.el.rippleToggle.setAttribute("aria-checked", on ? "true" : "false");
+      this.el.rippleToggle.setAttribute(
+        "aria-label",
+        on ? "关闭点击涟漪" : "开启点击涟漪"
+      );
+    }
+
+    setRippleEnabled(value, opts = {}) {
+      this.rippleEnabled = value !== false;
+      if (this.field) this.field.setRippleEnabled(this.rippleEnabled);
+      this.syncRippleUI();
+      if (opts.persist !== false) storeSet("prism.ripple", this.rippleEnabled ? "on" : "off");
+      if (opts.toast !== false) {
+        this.toast(
+          this.rippleEnabled ? "点击涟漪已开启 · 在 2D 粒子空白处点击试试" : "点击涟漪已关闭",
+          2200
+        );
+      }
+    }
+
     setSphereEnabled(value) {
       const next = Boolean(value);
       if (next && (!this.sphere || !this.sphere.supported)) {
@@ -1885,6 +1931,7 @@
         size: 30,
         opacity: 85,
         lines: 5,
+        offset: 0,
         translation: false,
       };
       try {
@@ -1900,6 +1947,7 @@
           size: clamp(Math.round(Number(raw.size) || defaults.size), 16, 64),
           opacity: clamp(Math.round(Number(raw.opacity) || defaults.opacity), 20, 100),
           lines: clamp(Math.round(Number(raw.lines) || defaults.lines), 1, 6),
+          offset: clamp(Math.round(Number(raw.offset) || 0), -500, 500),
           translation: raw.translation === true,
         };
       } catch (_) {
@@ -1907,8 +1955,43 @@
       }
     }
 
-    loadLyricsMap() {
+    loadLyricsOffsets() {
       try {
+        const raw = JSON.parse(storeGet("prism.lyricsOffsets", "{}"));
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+        const offsets = {};
+        for (const [key, value] of Object.entries(raw)) {
+          const ms = Number(value);
+          if (!key || !Number.isFinite(ms)) continue;
+          offsets[key] = clamp(Math.round(ms), -500, 500);
+        }
+        return offsets;
+      } catch (_) {
+        return {};
+      }
+    }
+
+    saveLyricsOffsets() {
+      storeSet("prism.lyricsOffsets", JSON.stringify(this.lyricsOffsets));
+    }
+
+    currentLyricOffset() {
+      const key = this.lyricsKeyFor(this.currentTrack);
+      if (key && Object.prototype.hasOwnProperty.call(this.lyricsOffsets, key)) {
+        return this.lyricsOffsets[key];
+      }
+      return clamp(Math.round(Number(this.lyricsSettings.offset) || 0), -500, 500);
+    }
+
+    syncLyricOffsetUI() {
+      const value = this.currentLyricOffset();
+      if (this.el.lyricsOffset) this.el.lyricsOffset.value = String(value);
+      if (this.el.lyricsOffsetValue) {
+        this.el.lyricsOffsetValue.textContent = this.lyricOffsetLabel(value);
+      }
+    }
+
+    loadLyricsMap() {      try {
         const raw = JSON.parse(storeGet("prism.lyricsMap", "{}"));
         if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
         return raw;
@@ -2017,6 +2100,7 @@
       }
       this.el.lyricsOpacity.value = String(s.opacity);
       this.el.lyricsOpacityValue.textContent = s.opacity + "%";
+      this.syncLyricOffsetUI();
       this.updateLyrics(true);
       this.updateLyricsStatus();
     }
@@ -2161,6 +2245,25 @@
       this.applyLyricsSettings();
     }
 
+    lyricOffsetLabel(value) {
+      const ms = Math.round(Number(value) || 0);
+      return (ms > 0 ? "+" : "") + ms + "ms";
+    }
+
+    setLyricsOffset(value) {
+      const next = clamp(Math.round((Number(value) || 0) / 10) * 10, -500, 500);
+      const key = this.lyricsKeyFor(this.currentTrack);
+      if (key) {
+        this.lyricsOffsets[key] = next;
+        this.saveLyricsOffsets();
+      } else {
+        this.lyricsSettings.offset = next;
+        this.persistLyricsSettings();
+      }
+      this.syncLyricOffsetUI();
+      this.updateLyrics(true);
+    }
+
     setLyricsPosition(x, y, opts = {}) {
       this.lyricsSettings.x = clamp(Number(x) || 50, 4, 96);
       this.lyricsSettings.y = clamp(Number(y) || 53, 4, 96);
@@ -2207,6 +2310,7 @@
       this.currentLyrics = raw ? this.parseLrc(raw) : [];
       this.currentTranslations = this.cachedTranslationsFor(key);
       this.lyricsActive = -1;
+      this.syncLyricOffsetUI();
       this.updateLyrics(true);
       this.updateLyricsStatus();
       this.updateLyricsTranslationStatus();
@@ -2218,8 +2322,18 @@
       if (!this.el.lyricsArtist || !this.el.lyricsTitle) return;
       const track = this.currentTrack;
       if (!track) return;
-      this.el.lyricsArtist.value = String(track.artist || "").replace(/_/g, " ").replace(/\s+/g, " ").trim();
-      this.el.lyricsTitle.value = String(track.title || "").replace(/_/g, " ").replace(/\s+/g, " ").trim();
+      const clean = (value) =>
+        String(value || "")
+          .replace(/_+/g, " ")
+          .replace(/\.(mp3|wav|flac|m4a|aac|ogg|opus|wma)$/i, "")
+          .replace(/^\s*\d{1,3}\s*[-._、)]\s*/, "")
+          .replace(/\s+/g, " ")
+          .trim();
+      const artist = clean(track.artist);
+      this.el.lyricsArtist.value = /^(unknown artist|unknown|various artists|va|群星|未知艺术家|未知歌手|未知)$/i.test(artist)
+        ? ""
+        : artist;
+      this.el.lyricsTitle.value = clean(track.title);
     }
 
     setLyricsOnlineStatus(text, tone = "") {
@@ -2257,7 +2371,7 @@
       }
 
       this.setLyricsSearchBusy(true);
-      this.setLyricsOnlineStatus("正在搜索同步歌词…");
+      this.setLyricsOnlineStatus("正在搜索同步歌词（LRCLIB / 网易云音乐）…");
       try {
         const response = await desktop.searchLyrics({
           title,
@@ -2270,22 +2384,23 @@
         }
         const result = response.result;
         if (!result) {
-          this.setLyricsOnlineStatus("没有找到匹配歌词，可以换个歌手或歌名试试", "error");
+          this.setLyricsOnlineStatus("没有找到匹配歌词（已尝试 LRCLIB 与网易云音乐），可以换个歌手或歌名试试", "error");
           return;
         }
+        const source = result.source || "LRCLIB";
         if (this.currentTrack !== track) {
           this.setLyricsOnlineStatus("歌曲已切换，本次搜索结果未导入", "error");
           return;
         }
         if (result.instrumental) {
-          this.setLyricsOnlineStatus("这首歌被标记为纯音乐，没有歌词", "error");
+          this.setLyricsOnlineStatus("这首歌被标记为纯音乐，没有歌词（" + source + "）", "error");
           return;
         }
         if (!result.syncedLyrics) {
           this.setLyricsOnlineStatus(
             result.plainLyrics
-              ? "只找到纯文本歌词，没有时间轴，无法同步显示"
-              : "没有找到可用的同步歌词",
+              ? "只找到纯文本歌词，没有时间轴，无法同步显示（" + source + "）"
+              : "没有找到可用的同步歌词（" + source + "）",
             "error"
           );
           return;
@@ -2299,10 +2414,10 @@
         this.el.lyricsTitle.value = result.trackName || title;
         this.importLyricsText(
           result.syncedLyrics,
-          (result.artistName || artist || "LRCLIB") + " · " + (result.trackName || title)
+          source + " · " + (result.artistName || artist || "未知歌手") + " · " + (result.trackName || title)
         );
         this.setLyricsOnlineStatus(
-          "已匹配 LRCLIB · " + (result.artistName || artist || "未知歌手") + " · " + parsed.length + " 行",
+          "已匹配 " + source + " · " + (result.artistName || artist || "未知歌手") + " · " + parsed.length + " 行",
           "ok"
         );
       } catch (_) {
@@ -2377,11 +2492,7 @@
       }
       this.el.lyricsOverlay.setAttribute("aria-hidden", "false");
       const time = Number.isFinite(this.audio.currentTime) ? this.audio.currentTime : 0;
-      let active = 0;
-      for (let i = 0; i < this.currentLyrics.length; i += 1) {
-        if (this.currentLyrics[i].time <= time + 0.12) active = i;
-        else break;
-      }
+      const active = this.activeLyricIndex(time);
       if (force || active !== this.lyricsActive) {
         const previous = this.lyricsActive;
         this.lyricsActive = active;
@@ -2390,6 +2501,36 @@
           direction: active >= previous ? 1 : -1,
         });
       }
+    }
+
+    activeLyricIndex(time) {
+      if (!this.currentLyrics.length) return -1;
+      const offset = this.currentLyricOffset();
+      const t = Number(time) + LYRIC_LEAD - offset / 1000;
+      let active = 0;
+      for (let i = 0; i < this.currentLyrics.length; i += 1) {
+        if (this.currentLyrics[i].time <= t) active = i;
+        else break;
+      }
+      return active;
+    }
+
+    /* timeupdate only fires ~4x/s, which makes lyric lines visibly late.
+       While playing, drive the lyric highlight from rAF instead. */
+    startLyricsSync() {
+      if (this.lyricsSyncRaf) return;
+      this.lyricsSyncRaf = requestAnimationFrame(this._lyricsSync);
+    }
+
+    stopLyricsSync() {
+      if (this.lyricsSyncRaf) cancelAnimationFrame(this.lyricsSyncRaf);
+      this.lyricsSyncRaf = 0;
+    }
+
+    _lyricsSync() {
+      this.lyricsSyncRaf = requestAnimationFrame(this._lyricsSync);
+      if (!this.audio || this.audio.paused) return;
+      this.updateLyrics();
     }
 
     renderLyricLines(active, opts = {}) {
@@ -2522,6 +2663,9 @@
     }
 
     closeAlbumWall() {
+      if (this.albumPointerState && this.albumPointerState.active) {
+        this.cancelAlbumPointerDrag(this.albumPointerState, "");
+      }
       this.albumWallOpen = false;
       this.clearAlbumDeleteEdge();
       this.el.albumWall.classList.remove("is-open");
@@ -2546,8 +2690,9 @@
       this.tracks.forEach((track, index) => {
         const card = document.createElement("article");
         card.className = "album-card" + (index === this.currentIndex ? " is-current" : "");
-        card.draggable = true;
+        card.draggable = false;
         card.dataset.index = String(index);
+        card.dataset.trackId = track.id;
         card.tabIndex = 0;
         card.setAttribute("role", "button");
         card.setAttribute("aria-label", "播放 " + (track.title || "Untitled") + "，可拖拽排序");
@@ -2845,7 +2990,648 @@
           card.style.transition = "";
         }, 380);
       });
+      this.markPlaylistDirty();
       this.toast("播放顺序已更新", 1400);
+    }
+
+    /* ---------- album wall pointer reorder ---------- */
+    albumVisibleCards() {
+      return [...this.el.albumGrid.querySelectorAll(".album-card")].filter(
+        (card) => !card.classList.contains("is-drag-source") && !card.classList.contains("is-floating")
+      );
+    }
+
+    onAlbumPointerDown(event) {
+      if (event.button !== 0 || this.albumPointerState) return;
+      const card = event.target.closest(".album-card");
+      if (!card || card.classList.contains("is-floating")) return;
+      this.albumPointerState = {
+        pointerId: event.pointerId == null ? 1 : event.pointerId,
+        card,
+        fromIndex: Number(card.dataset.index),
+        startX: event.clientX,
+        startY: event.clientY,
+        active: false,
+        target: Number(card.dataset.index),
+        homeRect: null,
+        clone: null,
+        placeholder: null,
+      };
+    }
+
+    onAlbumPointerMove(event) {
+      const state = this.albumPointerState;
+      if (!state || event.pointerId !== state.pointerId) return;
+      if (!state.active) {
+        const dx = event.clientX - state.startX;
+        const dy = event.clientY - state.startY;
+        if (Math.hypot(dx, dy) < 6) return;
+        this.beginAlbumPointerDrag(event);
+      }
+      if (!state.active) return;
+      if (event.cancelable) event.preventDefault();
+
+      const dx = event.clientX - state.startX;
+      const dy = event.clientY - state.startY;
+      if (state.clone) {
+        const home = state.homeRect;
+        const minDx = -home.left;
+        const maxDx = window.innerWidth - home.width - home.left;
+        const minDy = -home.top;
+        const maxDy = window.innerHeight - home.height - home.top;
+        const cx = Math.max(minDx, Math.min(maxDx, dx));
+        const cy = Math.max(minDy, Math.min(maxDy, dy));
+        state.clone.style.transform = "translate3d(" + cx + "px," + cy + "px,0) scale(1.03)";
+      }
+
+      const edge = this.albumDeleteEdgeAt(event.clientX, event.clientY);
+      this.setAlbumDeleteEdge(edge);
+      if (edge) return;
+
+      const target = this.albumTargetAt(event.clientX, event.clientY);
+      if (target >= 0) this.albumMovePlaceholder(target);
+      this.albumAutoScroll(event.clientY);
+    }
+
+    beginAlbumPointerDrag(event) {
+      const state = this.albumPointerState;
+      const card = state.card;
+      const rect = card.getBoundingClientRect();
+      state.homeRect = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+      state.active = true;
+      state.target = state.fromIndex;
+      this.albumJustDragged = false;
+
+      const clone = card.cloneNode(true);
+      clone.classList.remove("is-drag-source", "is-current");
+      clone.classList.add("is-floating");
+      clone.style.position = "fixed";
+      clone.style.left = rect.left + "px";
+      clone.style.top = rect.top + "px";
+      clone.style.width = rect.width + "px";
+      clone.style.height = rect.height + "px";
+      clone.style.margin = "0";
+      clone.style.zIndex = "70";
+      clone.style.pointerEvents = "none";
+      clone.style.willChange = "transform";
+      clone.style.transition = "transform .18s cubic-bezier(.2,.8,.2,1), box-shadow .18s";
+      clone.style.transform = "translate3d(0,0,0) scale(1.03)";
+      clone.style.boxShadow = "0 30px 60px rgba(0,0,0,.5)";
+      document.body.appendChild(clone);
+      state.clone = clone;
+
+      card.classList.add("is-drag-source");
+      card.style.display = "none";
+
+      const placeholder = document.createElement("div");
+      placeholder.className = "album-placeholder";
+      placeholder.style.height = rect.height + "px";
+      card.parentNode.insertBefore(placeholder, card);
+      state.placeholder = placeholder;
+
+      this.el.albumGrid.classList.add("is-reordering");
+      this.setAlbumDeleteEdge("");
+      if (event.pointerId != null) {
+        try {
+          card.setPointerCapture(event.pointerId);
+        } catch (_) {}
+      }
+    }
+
+    albumTargetAt(clientX, clientY) {
+      const state = this.albumPointerState;
+      if (!state || !state.placeholder) return -1;
+      const ph = state.placeholder.getBoundingClientRect();
+      if (
+        clientX >= ph.left + 10 &&
+        clientX <= ph.right - 10 &&
+        clientY >= ph.top + 10 &&
+        clientY <= ph.bottom - 10
+      ) {
+        return state.target;
+      }
+
+      const cards = this.albumVisibleCards();
+      let best = -1;
+      let bestDist = Infinity;
+      for (let i = 0; i < cards.length; i += 1) {
+        const rect = cards[i].getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const dist = (clientX - cx) * (clientX - cx) + (clientY - cy) * (clientY - cy);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = i;
+        }
+      }
+      if (best < 0) return -1;
+
+      const rect = cards[best].getBoundingClientRect();
+      const nx = (clientX - rect.left) / rect.width;
+      const ny = (clientY - rect.top) / rect.height;
+      if (nx < 0.15 || nx > 0.85 || ny < 0.15 || ny > 0.85) return -1;
+
+      const afterRow = ny > 0.65;
+      const afterCol = Math.abs(ny - 0.5) <= 0.15 && nx > 0.65;
+      const after = afterRow || afterCol;
+      return Math.min(cards.length, best + (after ? 1 : 0));
+    }
+
+    albumMovePlaceholder(target) {
+      const state = this.albumPointerState;
+      if (!state || !state.placeholder || target === state.target) return;
+      const cards = this.albumVisibleCards();
+      const before = new Map();
+      cards.forEach((card) => before.set(card, { x: card.offsetLeft, y: card.offsetTop }));
+
+      const reference = cards[target] || null;
+      if (reference) this.el.albumGrid.insertBefore(state.placeholder, reference);
+      else this.el.albumGrid.appendChild(state.placeholder);
+      state.target = target;
+      this.albumAnimateFlip(cards, before);
+    }
+
+    albumAnimateFlip(cards, before) {
+      cards.forEach((card) => {
+        const old = before.get(card);
+        if (!old) return;
+        const dx = old.x - card.offsetLeft;
+        const dy = old.y - card.offsetTop;
+        if (!dx && !dy) return;
+        card.classList.add("is-preview-moving");
+        card.style.transition = "none";
+        card.style.transform = "translate3d(" + dx + "px," + dy + "px,0)";
+        void card.offsetWidth;
+        card.style.transition = "";
+        card.style.transform = "";
+        window.setTimeout(() => card.classList.remove("is-preview-moving"), 380);
+      });
+    }
+
+    albumAutoScroll(clientY) {
+      const grid = this.el.albumGrid;
+      const rect = grid.getBoundingClientRect();
+      const margin = 70;
+      if (clientY < rect.top + margin) grid.scrollTop -= 10;
+      else if (clientY > rect.bottom - margin) grid.scrollTop += 10;
+    }
+
+    onAlbumPointerUp(event) {
+      const state = this.albumPointerState;
+      if (!state || event.pointerId !== state.pointerId) return;
+      if (!state.active) {
+        this.albumPointerState = null;
+        return;
+      }
+      if (event.cancelable) event.preventDefault();
+      const edge = this.albumDeleteEdgeAt(event.clientX, event.clientY);
+      if (edge) {
+        this.finishAlbumDeleteGesture(state);
+        return;
+      }
+      const rect = this.el.albumGrid.getBoundingClientRect();
+      const inside =
+        event.clientX >= rect.left &&
+        event.clientX <= rect.right &&
+        event.clientY >= rect.top &&
+        event.clientY <= rect.bottom;
+      if (!inside) {
+        this.cancelAlbumPointerDrag(state, "已取消拖拽 · 顺序未改变");
+        return;
+      }
+      this.commitAlbumPointerDrag(state);
+    }
+
+    onAlbumPointerCancel(event) {
+      const state = this.albumPointerState;
+      if (!state) return;
+      if (event && event.pointerId != null && event.pointerId !== state.pointerId) return;
+      if (!state.active) {
+        this.albumPointerState = null;
+        return;
+      }
+      this.cancelAlbumPointerDrag(state, "已取消拖拽 · 顺序未改变");
+    }
+
+    commitAlbumPointerDrag(state) {
+      const from = state.fromIndex;
+      const target = state.target;
+      if (target === from) {
+        this.cancelAlbumPointerDrag(state, "");
+        return;
+      }
+      const order = this.tracks.map((_, index) => index);
+      const [movedIndex] = order.splice(from, 1);
+      order.splice(target, 0, movedIndex);
+      const ordered = order.map((index) => this.tracks[index]);
+
+      const before = new Map();
+      this.albumVisibleCards().forEach((card) => {
+        const id = card.dataset.trackId;
+        if (id) before.set(id, card.getBoundingClientRect());
+      });
+      if (state.clone && state.card.dataset.trackId) {
+        before.set(state.card.dataset.trackId, state.clone.getBoundingClientRect());
+      }
+
+      this.cleanupAlbumPointer(state);
+
+      const current = this.currentTrack;
+      this.tracks.length = 0;
+      this.tracks.push(...ordered);
+      this.currentIndex = Math.max(0, this.tracks.indexOf(current));
+      this.el.trackIndex.textContent = pad2(this.currentIndex + 1);
+      this.renderQueue();
+      this.renderAlbumWall();
+
+      this.el.albumGrid.querySelectorAll(".album-card").forEach((card) => {
+        const old = before.get(card.dataset.trackId);
+        if (!old) return;
+        const now = card.getBoundingClientRect();
+        const dx = old.left - now.left;
+        const dy = old.top - now.top;
+        if (!dx && !dy) return;
+        card.classList.add("is-preview-moving");
+        card.style.transition = "none";
+        card.style.transform = "translate3d(" + dx + "px," + dy + "px,0)";
+        void card.offsetWidth;
+        card.style.transition = "";
+        card.style.transform = "";
+        window.setTimeout(() => card.classList.remove("is-preview-moving"), 380);
+      });
+
+      this.albumJustDragged = true;
+      window.setTimeout(() => {
+        this.albumJustDragged = false;
+      }, 250);
+      this.markPlaylistDirty();
+      this.toast("播放顺序已更新", 1400);
+    }
+
+    cancelAlbumPointerDrag(state, message) {
+      if (!state) return;
+      const cards = this.albumVisibleCards();
+      const before = new Map();
+      cards.forEach((card) => before.set(card, { x: card.offsetLeft, y: card.offsetTop }));
+
+      const clone = state.clone;
+      if (state.placeholder) state.placeholder.remove();
+      state.card.style.display = "";
+      state.card.style.opacity = "0";
+      state.card.classList.remove("is-drag-source");
+      this.el.albumGrid.classList.remove("is-reordering");
+      this.albumPointerState = null;
+
+      this.albumAnimateFlip(this.albumVisibleCards(), before);
+
+      if (clone) {
+        clone.style.transition = "transform .28s cubic-bezier(.2,.8,.2,1), opacity .28s";
+        clone.style.transform = "translate3d(0,0,0) scale(1)";
+        clone.style.opacity = "0.35";
+        window.setTimeout(() => clone.remove(), 300);
+      }
+      window.setTimeout(() => {
+        state.card.style.opacity = "";
+      }, 280);
+
+      this.setAlbumDeleteEdge("");
+      this.albumJustDragged = true;
+      window.setTimeout(() => {
+        this.albumJustDragged = false;
+      }, 250);
+      if (message) this.toast(message, 1800);
+    }
+
+    finishAlbumDeleteGesture(state) {
+      const index = state.fromIndex;
+      const clone = state.clone;
+      if (state.placeholder) state.placeholder.remove();
+      state.card.style.display = "";
+      state.card.classList.remove("is-drag-source");
+      this.el.albumGrid.classList.remove("is-reordering");
+      this.albumPointerState = null;
+      if (clone) {
+        clone.style.transition = "opacity .2s";
+        clone.style.opacity = "0";
+        window.setTimeout(() => clone.remove(), 220);
+      }
+      this.setAlbumDeleteEdge("");
+      this.albumJustDragged = true;
+      window.setTimeout(() => {
+        this.albumJustDragged = false;
+      }, 250);
+      this.deleteAlbumTrack(index);
+    }
+
+    cleanupAlbumPointer(state) {
+      if (!state) return;
+      if (state.placeholder) state.placeholder.remove();
+      if (state.clone) state.clone.remove();
+      state.card.style.display = "";
+      state.card.style.opacity = "";
+      state.card.classList.remove("is-drag-source");
+      this.el.albumGrid.classList.remove("is-reordering");
+      this.setAlbumDeleteEdge("");
+      this.albumPointerState = null;
+    }
+
+    /* ---------- queue pointer reorder ---------- */
+    queueVisibleItems() {
+      return [...this.el.queueList.querySelectorAll(".queue-item")].filter(
+        (item) => !item.classList.contains("is-drag-source") && !item.classList.contains("is-floating")
+      );
+    }
+
+    onQueuePointerDown(event) {
+      if (event.button !== 0 || this.queuePointerState) return;
+      if (this.queueSearchQuery.trim()) return;
+      if (event.target.closest(".remove-track")) return;
+      const item = event.target.closest(".queue-item");
+      if (!item || item.classList.contains("is-floating")) return;
+      this.queuePointerState = {
+        pointerId: event.pointerId == null ? 1 : event.pointerId,
+        item,
+        fromIndex: Number(item.dataset.index),
+        startX: event.clientX,
+        startY: event.clientY,
+        active: false,
+        target: Number(item.dataset.index),
+        homeRect: null,
+        clone: null,
+        placeholder: null,
+      };
+    }
+
+    onQueuePointerMove(event) {
+      const state = this.queuePointerState;
+      if (!state || event.pointerId !== state.pointerId) return;
+      if (!state.active) {
+        const dx = event.clientX - state.startX;
+        const dy = event.clientY - state.startY;
+        if (Math.hypot(dx, dy) < 6) return;
+        this.beginQueuePointerDrag(event);
+      }
+      if (!state.active) return;
+      if (event.cancelable) event.preventDefault();
+
+      const dx = event.clientX - state.startX;
+      const dy = event.clientY - state.startY;
+      if (state.clone) {
+        const home = state.homeRect;
+        const minDx = -home.left;
+        const maxDx = window.innerWidth - home.width - home.left;
+        const minDy = -home.top;
+        const maxDy = window.innerHeight - home.height - home.top;
+        const cx = Math.max(minDx, Math.min(maxDx, dx));
+        const cy = Math.max(minDy, Math.min(maxDy, dy));
+        state.clone.style.transform = "translate3d(" + cx + "px," + cy + "px,0) scale(1.015)";
+      }
+
+      const target = this.queueTargetAt(event.clientX, event.clientY);
+      if (target >= 0) this.queueMovePlaceholder(target);
+      this.queueAutoScroll(event.clientY);
+    }
+
+    beginQueuePointerDrag(event) {
+      const state = this.queuePointerState;
+      const item = state.item;
+      const rect = item.getBoundingClientRect();
+      state.homeRect = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+      state.active = true;
+      state.target = state.fromIndex;
+      this.queueJustDragged = false;
+
+      const clone = item.cloneNode(true);
+      clone.classList.remove("is-current", "is-drag-source");
+      clone.classList.add("is-floating");
+      clone.style.position = "fixed";
+      clone.style.left = rect.left + "px";
+      clone.style.top = rect.top + "px";
+      clone.style.width = rect.width + "px";
+      clone.style.height = rect.height + "px";
+      clone.style.margin = "0";
+      clone.style.zIndex = "80";
+      clone.style.pointerEvents = "none";
+      clone.style.willChange = "transform";
+      clone.style.transition = "transform .16s cubic-bezier(.2,.8,.2,1)";
+      clone.style.transform = "translate3d(0,0,0) scale(1.015)";
+      document.body.appendChild(clone);
+      state.clone = clone;
+
+      item.classList.add("is-drag-source");
+      item.style.display = "none";
+
+      const placeholder = document.createElement("li");
+      placeholder.className = "queue-placeholder";
+      placeholder.style.height = rect.height + "px";
+      item.parentNode.insertBefore(placeholder, item);
+      state.placeholder = placeholder;
+
+      this.el.queueList.classList.add("is-reordering");
+      if (event.pointerId != null) {
+        try {
+          item.setPointerCapture(event.pointerId);
+        } catch (_) {}
+      }
+    }
+
+    queueTargetAt(clientX, clientY) {
+      const state = this.queuePointerState;
+      if (!state || !state.placeholder) return -1;
+      const list = this.el.queueList;
+      const listRect = list.getBoundingClientRect();
+      if (clientX < listRect.left - 24 || clientX > listRect.right + 24) return -1;
+      if (clientY < listRect.top - 8 || clientY > listRect.bottom + 8) return -1;
+
+      const ph = state.placeholder.getBoundingClientRect();
+      if (clientY >= ph.top + 8 && clientY <= ph.bottom - 8) return state.target;
+
+      const items = this.queueVisibleItems();
+      let best = -1;
+      let bestDist = Infinity;
+      for (let i = 0; i < items.length; i += 1) {
+        const rect = items[i].getBoundingClientRect();
+        const cy = rect.top + rect.height / 2;
+        const dist = Math.abs(clientY - cy);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = i;
+        }
+      }
+      if (best < 0) return -1;
+
+      const rect = items[best].getBoundingClientRect();
+      const ny = (clientY - rect.top) / rect.height;
+      if (ny < 0.2 || ny > 0.8) return -1;
+      const after = ny > 0.62;
+      return Math.min(items.length, best + (after ? 1 : 0));
+    }
+
+    queueMovePlaceholder(target) {
+      const state = this.queuePointerState;
+      if (!state || !state.placeholder || target === state.target) return;
+      const items = this.queueVisibleItems();
+      const before = new Map();
+      items.forEach((item) => before.set(item, item.offsetTop));
+
+      const reference = items[target] || null;
+      if (reference) this.el.queueList.insertBefore(state.placeholder, reference);
+      else this.el.queueList.appendChild(state.placeholder);
+      state.target = target;
+      this.queueAnimateFlip(items, before);
+    }
+
+    queueAnimateFlip(items, before) {
+      items.forEach((item) => {
+        const old = before.get(item);
+        if (old == null) return;
+        const dy = old - item.offsetTop;
+        if (!dy) return;
+        item.classList.add("is-preview-moving");
+        item.style.transition = "none";
+        item.style.transform = "translate3d(0," + dy + "px,0)";
+        void item.offsetWidth;
+        item.style.transition = "";
+        item.style.transform = "";
+        window.setTimeout(() => item.classList.remove("is-preview-moving"), 340);
+      });
+    }
+
+    queueAutoScroll(clientY) {
+      const list = this.el.queueList;
+      const rect = list.getBoundingClientRect();
+      if (clientY < rect.top + 46) list.scrollTop -= 8;
+      else if (clientY > rect.bottom - 46) list.scrollTop += 8;
+    }
+
+    onQueuePointerUp(event) {
+      const state = this.queuePointerState;
+      if (!state || event.pointerId !== state.pointerId) return;
+      if (!state.active) {
+        this.queuePointerState = null;
+        return;
+      }
+      if (event.cancelable) event.preventDefault();
+      const rect = this.el.queueList.getBoundingClientRect();
+      const inside =
+        event.clientX >= rect.left - 12 &&
+        event.clientX <= rect.right + 12 &&
+        event.clientY >= rect.top &&
+        event.clientY <= rect.bottom;
+      if (!inside) {
+        this.cancelQueuePointerDrag(state, "已取消拖拽 · 顺序未改变");
+        return;
+      }
+      this.commitQueuePointerDrag(state);
+    }
+
+    onQueuePointerCancel(event) {
+      const state = this.queuePointerState;
+      if (!state) return;
+      if (event && event.pointerId != null && event.pointerId !== state.pointerId) return;
+      if (!state.active) {
+        this.queuePointerState = null;
+        return;
+      }
+      this.cancelQueuePointerDrag(state, "");
+    }
+
+    commitQueuePointerDrag(state) {
+      const from = state.fromIndex;
+      const target = state.target;
+      if (target === from) {
+        this.cancelQueuePointerDrag(state, "");
+        return;
+      }
+      const order = this.tracks.map((_, index) => index);
+      const [movedIndex] = order.splice(from, 1);
+      order.splice(target, 0, movedIndex);
+      const ordered = order.map((index) => this.tracks[index]);
+
+      const scrollTop = this.el.queueList.scrollTop;
+      const before = new Map();
+      this.queueVisibleItems().forEach((item) => {
+        const id = item.dataset.trackId;
+        if (id) before.set(id, item.getBoundingClientRect());
+      });
+      if (state.clone && state.item.dataset.trackId) {
+        before.set(state.item.dataset.trackId, state.clone.getBoundingClientRect());
+      }
+
+      this.cleanupQueuePointer(state);
+
+      const current = this.currentTrack;
+      this.tracks.length = 0;
+      this.tracks.push(...ordered);
+      this.currentIndex = Math.max(0, this.tracks.indexOf(current));
+      this.renderQueue();
+      this.el.queueList.scrollTop = scrollTop;
+
+      this.el.queueList.querySelectorAll(".queue-item").forEach((item) => {
+        const old = before.get(item.dataset.trackId);
+        if (!old) return;
+        const now = item.getBoundingClientRect();
+        const dy = old.top - now.top;
+        if (!dy) return;
+        item.classList.add("is-preview-moving");
+        item.style.transition = "none";
+        item.style.transform = "translate3d(0," + dy + "px,0)";
+        void item.offsetWidth;
+        item.style.transition = "";
+        item.style.transform = "";
+        window.setTimeout(() => item.classList.remove("is-preview-moving"), 340);
+      });
+
+      this.queueJustDragged = true;
+      window.setTimeout(() => {
+        this.queueJustDragged = false;
+      }, 250);
+      this.markPlaylistDirty();
+      this.toast("播放顺序已更新", 1400);
+    }
+
+    cancelQueuePointerDrag(state, message) {
+      if (!state) return;
+      const items = this.queueVisibleItems();
+      const before = new Map();
+      items.forEach((item) => before.set(item, item.offsetTop));
+
+      const clone = state.clone;
+      if (state.placeholder) state.placeholder.remove();
+      state.item.style.display = "";
+      state.item.style.opacity = "0";
+      state.item.classList.remove("is-drag-source");
+      this.el.queueList.classList.remove("is-reordering");
+      this.queuePointerState = null;
+
+      this.queueAnimateFlip(this.queueVisibleItems(), before);
+
+      if (clone) {
+        clone.style.transition = "transform .26s cubic-bezier(.2,.8,.2,1), opacity .26s";
+        clone.style.transform = "translate3d(0,0,0) scale(1)";
+        clone.style.opacity = "0.35";
+        window.setTimeout(() => clone.remove(), 280);
+      }
+      window.setTimeout(() => {
+        state.item.style.opacity = "";
+      }, 260);
+
+      this.queueJustDragged = true;
+      window.setTimeout(() => {
+        this.queueJustDragged = false;
+      }, 250);
+      if (message) this.toast(message, 1800);
+    }
+
+    cleanupQueuePointer(state) {
+      if (!state) return;
+      if (state.placeholder) state.placeholder.remove();
+      if (state.clone) state.clone.remove();
+      state.item.style.display = "";
+      state.item.style.opacity = "";
+      state.item.classList.remove("is-drag-source");
+      this.el.queueList.classList.remove("is-reordering");
+      this.queuePointerState = null;
     }
 
     /* ---------- todo ---------- */
@@ -3237,6 +4023,7 @@
       this.el.duration.textContent = formatTime(track.duration);
       this.renderQueue();
       this.updatePlayUI(false);
+      if (opts.remember !== false) this.rememberCurrentTrack();
       this.field.pulse(0.5);
       if (this.sphere) this.sphere.pulse(0.4);
 
@@ -3247,6 +4034,30 @@
       if (opts.autoplay) {
         this.play().catch(() => {});
       }
+    }
+
+    trackStateKey(track) {
+      if (!track) return "";
+      if (track.filePath) return "file:" + track.filePath;
+      if (track.kind === "demo") return "demo:" + track.id;
+      return "local:" + (track.title || "") + "|" + (track.artist || "");
+    }
+
+    rememberCurrentTrack() {
+      const track = this.currentTrack;
+      if (!track) return;
+      storeSet("prism.lastTrack", this.trackStateKey(track));
+    }
+
+    resumeLastTrack() {
+      const key = storeGet("prism.lastTrack", "");
+      if (!key) return false;
+      const index = this.tracks.findIndex((track) => this.trackStateKey(track) === key);
+      if (index < 0) return false;
+      if (index !== this.currentIndex) {
+        this.selectTrack(index, { autoplay: false, remember: false });
+      }
+      return true;
     }
 
     applyTrackUI(track) {
@@ -3299,6 +4110,7 @@
     onPlay() {
       this.field.setPlaying(true);
       if (this.sphere) this.sphere.setPlaying(true);
+      this.startLyricsSync();
       this.updatePlayUI(true);
       this.setStatus("playing");
       this.updateMediaSessionState("playing");
@@ -3307,6 +4119,7 @@
     onPause() {
       this.field.setPlaying(false);
       if (this.sphere) this.sphere.setPlaying(false);
+      this.stopLyricsSync();
       this.updatePlayUI(false);
       if (!this.audio.ended) this.setStatus(this.entered ? "paused" : "standby");
       this.updateMediaSessionState("paused");
@@ -3315,6 +4128,7 @@
     onEnded() {
       this.field.setPlaying(false);
       if (this.sphere) this.sphere.setPlaying(false);
+      this.stopLyricsSync();
       this.updatePlayUI(false);
       if (this.repeat === "one") {
         this.audio.currentTime = 0;
@@ -3793,6 +4607,7 @@
         }
 
         li.addEventListener("click", () => {
+          if (this.queueJustDragged) return;
           if (index === this.currentIndex) {
             if (this.audio.paused) this.play();
             else this.pause();
@@ -3837,6 +4652,9 @@
 
     toggleQueue(force) {
       const open = typeof force === "boolean" ? force : !this.queueOpen;
+      if (!open && this.queuePointerState && this.queuePointerState.active) {
+        this.cancelQueuePointerDrag(this.queuePointerState, "");
+      }
       if (open) {
         if (this.settingsOpen) this.toggleSettings(false);
         if (this.backgroundSettingsOpen) this.toggleBackgroundSettings(false);
@@ -4485,11 +5303,27 @@
         return;
       }
 
+      const localTracks = this.tracks.filter(
+        (track) => track.kind === "local" && track.filePath
+      );
       const folders = [...new Set(
-        this.tracks
-          .filter((track) => track.kind === "local" && track.folderPath)
+        localTracks
           .map((track) => track.folderPath)
+          .filter(Boolean)
       )];
+      const savedTracks = localTracks.map((track) => ({
+        filePath: track.filePath,
+        title: track.title || "",
+        artist: track.artist || "",
+        album: track.album || "",
+        folder: track.folder || "",
+        folderPath: track.folderPath || "",
+        relativeFolder: track.relativeFolder || "",
+        duration: track.duration || 0,
+      }));
+      const current = this.currentTrack && this.currentTrack.kind === "local" && this.currentTrack.filePath
+        ? { filePath: this.currentTrack.filePath, title: this.currentTrack.title || "" }
+        : null;
 
       this.saveBusy = true;
       this.el.savePlaylist.disabled = true;
@@ -4497,18 +5331,21 @@
       this.setSaveState("保存中…", "busy");
 
       try {
-        const result = await desktop.savePlaylist({ folders });
+        const result = await desktop.savePlaylist({ folders, tracks: savedTracks, current });
         if (!result || !result.ok) {
           this.setSaveState("保存失败", "dirty");
           this.toast("保存失败，请重试", 2600);
           return;
         }
-        if (folders.length) {
-          this.setSaveState("已保存 " + folders.length + " 个文件夹", "saved");
-          this.toast("已保存 " + folders.length + " 个音乐文件夹 · 下次打开自动恢复", 3400);
+        if (savedTracks.length) {
+          this.setSaveState("已保存 " + savedTracks.length + " 首", "saved");
+          this.toast("已保存 " + savedTracks.length + " 首音乐 · 下次打开自动恢复", 3400);
+        } else if (folders.length) {
+          this.setSaveState("已保存 · 无歌曲", "saved");
+          this.toast("当前播放列表里没有可保存的音乐", 3000);
         } else {
-          this.setSaveState("已保存 · 无文件夹", "saved");
-          this.toast("当前播放列表里没有可保存的音乐文件夹", 3000);
+          this.setSaveState("已保存 · 空列表", "saved");
+          this.toast("当前播放列表里没有可保存的音乐", 3000);
         }
       } catch (_) {
         this.setSaveState("保存失败", "dirty");
@@ -4524,6 +5361,7 @@
       const desktop = window.prismDesktop;
       if (!desktop || typeof desktop.restorePlaylist !== "function") {
         this.setSaveState("桌面版可保存");
+        this.resumeLastTrack();
         return;
       }
 
@@ -4531,37 +5369,45 @@
       this.setSaveState("正在恢复…", "busy");
       try {
         const result = await desktop.restorePlaylist();
-        if (!result || !result.ok) {
-          this.setSaveState("恢复失败", "dirty");
-          return;
-        }
-        if (!result.saved) {
-          this.setSaveState("未保存");
+        if (!result || !result.ok || !result.saved) {
+          this.setSaveState(result && result.ok ? "未保存" : "恢复失败", result && result.ok ? "" : "dirty");
           return;
         }
 
         let added = 0;
         let skipped = 0;
-        for (const folder of result.folders || []) {
-          const item = this.importFolderResult(folder, { restore: true });
-          added += item.added;
-          skipped += item.skipped;
+        let missing = 0;
+
+        if (result.version >= 2 && Array.isArray(result.tracks)) {
+          const restored = this.restoreSavedTracks(result);
+          added = restored.added;
+          skipped = restored.skipped;
+          missing = Array.isArray(result.missing) ? result.missing.length : 0;
+          if (result.current && result.current.filePath && !storeGet("prism.lastTrack", "")) {
+            storeSet("prism.lastTrack", "file:" + result.current.filePath);
+          }
+        } else {
+          for (const folder of result.folders || []) {
+            const item = this.importFolderResult(folder, { restore: true });
+            added += item.added;
+            skipped += item.skipped;
+          }
+          missing = Array.isArray(result.missingFolders) ? result.missingFolders.length : 0;
         }
 
-        const missing = Array.isArray(result.missingFolders) ? result.missingFolders.length : 0;
         if (added) {
           this.setSaveState(
-            missing ? "已恢复 " + added + " 首 · 缺 " + missing + " 个" : "已恢复 " + added + " 首",
+            missing ? "已恢复 " + added + " 首 · 缺 " + missing + " 首" : "已恢复 " + added + " 首",
             "saved"
           );
           this.toast(
             "已恢复上次播放列表 · " + added + " 首音乐" +
-              (missing ? " · " + missing + " 个文件夹不可用" : ""),
+              (missing ? " · " + missing + " 首文件不可用" : ""),
             3400
           );
         } else if (missing) {
-          this.setSaveState("保存的文件夹不可用", "dirty");
-          this.toast("有 " + missing + " 个保存的音乐文件夹不可用", 3400);
+          this.setSaveState("保存的歌曲不可用", "dirty");
+          this.toast("有 " + missing + " 首保存的歌曲文件不可用", 3400);
         } else if (skipped) {
           this.setSaveState("已恢复上次列表", "saved");
         } else {
@@ -4571,7 +5417,47 @@
         this.setSaveState("恢复失败", "dirty");
       } finally {
         this.restoringPlaylist = false;
+        this.resumeLastTrack();
       }
+    }
+
+    restoreSavedTracks(result) {
+      const known = new Set(this.tracks.map((track) => track.src));
+      const added = [];
+      let skipped = 0;
+      for (const item of result.tracks) {
+        if (!item || !item.url || known.has(item.url)) {
+          skipped += 1;
+          continue;
+        }
+        const folderName = item.folder || (item.folderPath ? String(item.folderPath).split(/[\\/]/).pop() : "音乐文件夹");
+        const parsed = this.parseLocalName(item.name || item.path || "", folderName);
+        const track = {
+          id: "saved-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+          kind: "local",
+          title: item.title || parsed.title,
+          artist: item.artist || parsed.artist,
+          album: item.album || folderName,
+          src: item.url,
+          cover: "",
+          duration: Number(item.duration) || 0,
+          bpm: null,
+          mood: "LOCAL FOLDER",
+          palette: ["#8ef4ff", "#ff9be2", "#ffd39a"],
+          filePath: item.path || item.filePath || "",
+          folderPath: item.folderPath || null,
+          folder: folderName,
+          relativeFolder: item.relativeFolder || "",
+        };
+        known.add(track.src);
+        this.tracks.push(track);
+        added.push(track);
+      }
+      this.applyCachedDurations(added);
+      this.renderQueue();
+      this.hydrateCovers(added);
+      this.hydrateDurations(added);
+      return { added: added.length, skipped };
     }
 
     onDragEnter(e) {
@@ -4642,6 +5528,16 @@
         e.preventDefault();
         if (this.welcomeOpen) this.enter();
         else this.togglePlay();
+        return;
+      }
+      if (e.key === "Escape" && this.albumPointerState && this.albumPointerState.active) {
+        e.preventDefault();
+        this.cancelAlbumPointerDrag(this.albumPointerState, "已取消拖拽 · 顺序未改变");
+        return;
+      }
+      if (e.key === "Escape" && this.queuePointerState && this.queuePointerState.active) {
+        e.preventDefault();
+        this.cancelQueuePointerDrag(this.queuePointerState, "已取消拖拽 · 顺序未改变");
         return;
       }
       if (e.key === "Escape") {

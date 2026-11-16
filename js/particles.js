@@ -135,6 +135,9 @@
       this.rings = [];
       this.lastRing = 0;
       this.ringSpawns = 0;
+      this.impacts = [];
+      this.rippleEnabled = true;
+      this._rippleOut = { x: 0, y: 0, glow: 0 };
       this.sparks = [];
       this.particles = [];
       this.coreParticles = [];
@@ -153,15 +156,18 @@
       this._buildColorTable();
       this._onResize = this._debouncedResize.bind(this);
       this._onPointer = this._handlePointer.bind(this);
+      this._onCanvasPointer = this._handleCanvasPointer.bind(this);
       this._tick = this._tick.bind(this);
 
       window.addEventListener("resize", this._onResize, { passive: true });
       window.addEventListener("pointermove", this._onPointer, { passive: true });
+      this.canvas.addEventListener("pointerdown", this._onCanvasPointer);
       document.addEventListener("visibilitychange", () => {
         this.lastTime = performance.now();
       });
 
       this.resize();
+      this.setRippleEnabled(true);
       requestAnimationFrame(this._tick);
     }
 
@@ -219,6 +225,48 @@
       this.beatPulse = Math.min(1.8, this.beatPulse + strength);
       this._spawnRing(strength);
       this._burstSparks(6 + Math.floor(10 * strength), strength);
+    }
+
+    setRippleEnabled(value) {
+      this.rippleEnabled = value !== false;
+      if (this.canvas) {
+        this.canvas.style.pointerEvents = this.rippleEnabled ? "auto" : "none";
+        this.canvas.style.cursor = this.rippleEnabled ? "pointer" : "";
+      }
+      if (!this.rippleEnabled) this.impacts.length = 0;
+    }
+
+    /* Ripples may only be dropped around the particle field: the outermost
+       particle ring plus a short margin. Clicks farther out do nothing. */
+    rippleReach() {
+      return this.maxR * 1.3 + 10;
+    }
+
+    dropRipple(x, y, strength = 1) {
+      if (!this.rippleEnabled) return null;
+      const px = Number(x);
+      const py = Number(y);
+      if (!Number.isFinite(px) || !Number.isFinite(py)) return null;
+      const cx = this.cx + this.pointer.x * 8;
+      const cy = this.cy + this.pointer.y * 6;
+      const reach = this.rippleReach();
+      const dx = clamp(px, 0, this.w) - cx;
+      const dy = clamp(py, 0, this.h) - cy;
+      if (dx * dx + dy * dy > reach * reach) return null;
+      const impact = {
+        x: clamp(px, 0, this.w),
+        y: clamp(py, 0, this.h),
+        age: 0,
+        life: 2.6,
+        strength: clamp(Number(strength) || 1, 0.4, 1.8),
+        wave: 0,
+        spread: this.maxR * 0.045,
+        fade: 1,
+      };
+      this.impacts.push(impact);
+      if (this.impacts.length > 6) this.impacts.shift();
+      this.beatPulse = Math.min(2.2, this.beatPulse + 0.22 * impact.strength);
+      return impact;
     }
 
     /* ---------- setup ---------- */
@@ -485,6 +533,26 @@
       if (e.pointerType === "touch") return;
       this.pointer.tx = (e.clientX / this.w - 0.5) * 2;
       this.pointer.ty = (e.clientY / this.h - 0.5) * 2;
+      if (!this.rippleEnabled || !this.active) return;
+      // Show the normal pointing-hand cursor only inside the ripple trigger
+      // area; the rest of the canvas keeps the default arrow.
+      const rect = this.canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const dx = x - (this.cx + this.pointer.tx * 8);
+      const dy = y - (this.cy + this.pointer.ty * 6);
+      const reach = this.rippleReach();
+      this.canvas.style.cursor = dx * dx + dy * dy <= reach * reach ? "pointer" : "";
+    }
+
+    _handleCanvasPointer(e) {
+      if (!this.rippleEnabled || !this.active || e.button !== 0) return;
+      const rect = this.canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      if (x < 0 || y < 0 || x > this.w || y > this.h) return;
+      const impact = this.dropRipple(x, y, 1);
+      if (impact && e.cancelable) e.preventDefault();
     }
 
     /* ---------- particles / rings / sparks ---------- */
@@ -547,6 +615,43 @@
       }
     }
 
+    _updateImpacts(dt) {
+      for (let i = this.impacts.length - 1; i >= 0; i--) {
+        const impact = this.impacts[i];
+        impact.age += dt;
+        if (impact.age >= impact.life) {
+          this.impacts.splice(i, 1);
+          continue;
+        }
+        impact.wave = impact.age * this.maxR * 1.2;
+        impact.spread = this.maxR * (0.045 + impact.age * 0.018);
+        impact.fade = Math.pow(Math.max(0, 1 - impact.age / impact.life), 1.35);
+      }
+    }
+
+    _rippleAt(x, y) {
+      const out = this._rippleOut;
+      out.x = 0;
+      out.y = 0;
+      out.glow = 0;
+      for (let i = 0; i < this.impacts.length; i += 1) {
+        const impact = this.impacts[i];
+        const dx = x - impact.x;
+        const dy = y - impact.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 0.5) continue;
+        const diff = dist - impact.wave;
+        const reach = impact.spread * 2.7;
+        if (diff > reach || diff < -reach) continue;
+        const band = Math.exp(-(diff * diff) / (2 * impact.spread * impact.spread));
+        const push = this.maxR * 0.038 * impact.strength * impact.fade * band;
+        out.x += (dx / dist) * push - (dy / dist) * push * 0.16;
+        out.y += (dy / dist) * push + (dx / dist) * push * 0.16;
+        out.glow += band * impact.fade;
+      }
+      return out;
+    }
+
     _updateMotes(dt) {
       const bassMotion = (this.low * 1.8 + this.beatPulse * 0.35) * this.motion;
       const boost = 0.55 + bassMotion;
@@ -601,6 +706,7 @@
       this.time += dt;
       this._updateSpectrum(dt);
       this._updateRings(dt);
+      this._updateImpacts(dt);
       this._updateSparks(dt);
       this._updateMotes(dt);
       this._updateParticles(dt);
@@ -629,6 +735,7 @@
       this._drawCore(ctx, cx, cy, maxR, bass, high, time);
       this._drawCoreRays(ctx, cx, cy, maxR, bass, time);
       this._drawRings(ctx, cx, cy);
+      this._drawImpacts(ctx);
       this._drawMotes(ctx, cx, cy, maxR, time);
       this._drawParticles(ctx, cx, cy, maxR, bass, high, time);
       this._drawCoreParticles(ctx, cx, cy, maxR, bass, time);
@@ -886,6 +993,37 @@
       }
     }
 
+    _drawImpacts(ctx) {
+      for (const impact of this.impacts) {
+        const fade = impact.fade;
+        if (fade <= 0) continue;
+        const rings = [1, 0.72, 0.46];
+        for (let i = 0; i < rings.length; i += 1) {
+          const radius = impact.wave * rings[i];
+          if (radius < 1) continue;
+          const alpha = fade * fade * (i === 0 ? 0.55 : i === 1 ? 0.24 : 0.12) * impact.strength;
+          if (alpha < 0.004) continue;
+          ctx.beginPath();
+          ctx.arc(impact.x, impact.y, radius, 0, TAU_SAFE);
+          ctx.strokeStyle = rgba(i === 2 ? this.palette.b : this.palette.a, alpha);
+          ctx.lineWidth = i === 0 ? 1.5 : 0.8;
+          ctx.stroke();
+        }
+        if (impact.age < 0.32) {
+          const a = (1 - impact.age / 0.32) * 0.55 * impact.strength;
+          const radius = this.maxR * 0.1;
+          const gradient = ctx.createRadialGradient(impact.x, impact.y, 0, impact.x, impact.y, radius);
+          gradient.addColorStop(0, "rgba(255,255,255," + a.toFixed(3) + ")");
+          gradient.addColorStop(0.35, rgba(this.palette.a, a * 0.5));
+          gradient.addColorStop(1, rgba(this.palette.a, 0));
+          ctx.fillStyle = gradient;
+          ctx.beginPath();
+          ctx.arc(impact.x, impact.y, radius, 0, TAU);
+          ctx.fill();
+        }
+      }
+    }
+
     _isStrokeShape(shape) {
       return shape === "line" || shape === "snow";
     }
@@ -928,18 +1066,26 @@
           ambient +
           Math.sin(time * 1.2 + p.phase) * 0.5;
         const parallax = 1 + p.r * 0.34;
-        const x = cx + Math.cos(angle) * rr + this.pointer.x * 5 * parallax;
-        const y = cy + Math.sin(angle) * rr + this.pointer.y * 4 * parallax;
+        let x = cx + Math.cos(angle) * rr + this.pointer.x * 5 * parallax;
+        let y = cy + Math.sin(angle) * rr + this.pointer.y * 4 * parallax;
+        let rippleGlow = 0;
+        if (this.impacts.length) {
+          const ripple = this._rippleAt(x, y);
+          x += ripple.x;
+          y += ripple.y;
+          rippleGlow = ripple.glow;
+        }
 
         const twinkle = 0.7 + 0.3 * Math.sin(time * (1.1 + p.twinkle) + p.phase);
-        let alpha = (0.18 + level * 1.18 + this.beatPulse * 0.14) * twinkle;
+        let alpha = (0.18 + level * 1.18 + this.beatPulse * 0.14) * twinkle + rippleGlow * 0.32;
         if (p.r > 0.82) alpha *= 1.08;
         alpha = clamp(alpha, 0.06, 0.98);
         const bucket = Math.min(4, Math.max(0, Math.floor(alpha / 0.2)));
         const size =
           p.size *
           (0.86 + level * 1.65 + this.beatPulse * 0.52 + this.kick * 0.24 + this.autoPulse * 0.22) *
-          (0.84 + p.variance * 0.2);
+          (0.84 + p.variance * 0.2) *
+          (1 + rippleGlow * 0.5);
         let rotation = 0;
         if (this.shape === "drop") {
           // The local tip points up; rotate it inward toward the centre.
@@ -985,8 +1131,13 @@
           if (p.r < 0.30) continue;
           const angle = p.angle + time * 0.0026 * p.spin;
           const rr = p.r * maxR + p.offset + Math.sin(time + p.phase) * 1.2;
-          const x = cx + Math.cos(angle) * rr;
-          const y = cy + Math.sin(angle) * rr;
+          let x = cx + Math.cos(angle) * rr;
+          let y = cy + Math.sin(angle) * rr;
+          if (this.impacts.length) {
+            const ripple = this._rippleAt(x, y);
+            x += ripple.x;
+            y += ripple.y;
+          }
           ctx.moveTo(x, y);
           ctx.arc(x, y, p.size * 2.2, 0, TAU_SAFE);
         }
@@ -999,8 +1150,13 @@
           const p = this.particles[i];
           const angle = p.angle + time * 0.004 * p.spin;
           const rr = p.r * maxR + p.offset + Math.sin(time * 1.2 + p.phase) * 0.8;
-          const x = cx + Math.cos(angle) * rr;
-          const y = cy + Math.sin(angle) * rr;
+          let x = cx + Math.cos(angle) * rr;
+          let y = cy + Math.sin(angle) * rr;
+          if (this.impacts.length) {
+            const ripple = this._rippleAt(x, y);
+            x += ripple.x;
+            y += ripple.y;
+          }
           ctx.moveTo(x, y);
           ctx.arc(x, y, p.size * 0.65, 0, TAU_SAFE);
         }

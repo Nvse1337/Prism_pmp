@@ -261,8 +261,18 @@
       this.height = 1;
       this.reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
       this.onCameraChange = null;
+      this.userRotX = 0;
+      this.userRotY = 0;
+      this.spin = 0;
+      this.drag = null;
       this._tick = this._tick.bind(this);
+      this._onPointerDown = this._onPointerDown.bind(this);
+      this._onPointerMove = this._onPointerMove.bind(this);
+      this._onPointerUp = this._onPointerUp.bind(this);
+      this._onMouseDown = this._onMouseDown.bind(this);
+      this._onDoubleClick = this._onDoubleClick.bind(this);
       this._init();
+      this._bindInput();
       window.addEventListener("resize", () => this.resize(), { passive: true });
       document.addEventListener("visibilitychange", () => {
         this.lastTime = performance.now();
@@ -413,6 +423,10 @@
     setActive(active) {
       this.active = !!active;
       this.lastTime = performance.now();
+      if (!this.active) {
+        this.drag = null;
+        if (this.canvas) this.canvas.classList.remove("is-dragging");
+      }
       if (this.active) this.resize();
     }
 
@@ -548,8 +562,9 @@
       this.time += dt;
       this._updateAudio(dt);
       this._updateCamera(dt);
-      this.group.rotation.y += dt * (this.reduced ? 0.03 : 0.07);
-      this.group.rotation.x = Math.sin(this.time * 0.12) * 0.05;
+      this.spin += dt * (this.reduced ? 0.03 : 0.07);
+      this.group.rotation.y = this.spin + this.userRotY;
+      this.group.rotation.x = Math.sin(this.time * 0.12) * 0.05 + this.userRotX;
       this._updateUniforms();
       this.renderer.render(this.scene, this.camera);
     }
@@ -658,6 +673,97 @@
       this.camera.updateMatrixWorld();
     }
 
+    _bindInput() {
+      if (!this.canvas) return;
+      this.canvas.addEventListener("pointerdown", this._onPointerDown);
+      window.addEventListener("pointermove", this._onPointerMove, { passive: false });
+      window.addEventListener("pointerup", this._onPointerUp);
+      window.addEventListener("pointercancel", this._onPointerUp);
+      this.canvas.addEventListener("mousedown", this._onMouseDown);
+      this.canvas.addEventListener("auxclick", this._onMouseDown);
+      this.canvas.addEventListener("dblclick", this._onDoubleClick);
+    }
+
+    _onMouseDown(event) {
+      // Middle mouse would otherwise start Chromium's autoscroll widget.
+      if (event.button === 1) event.preventDefault();
+    }
+
+    _onPointerDown(event) {
+      if (!this.active || !this.supported || this.drag) return;
+      if (event.button !== 0 && event.button !== 1) return;
+      event.preventDefault();
+      this.drag = {
+        mode: event.button === 1 ? "pan" : "rotate",
+        pointerId: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+      };
+      this.canvas.classList.add("is-dragging");
+      try {
+        this.canvas.setPointerCapture(event.pointerId);
+      } catch (_) {}
+    }
+
+    _onPointerMove(event) {
+      const drag = this.drag;
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      const dx = event.clientX - drag.x;
+      const dy = event.clientY - drag.y;
+      drag.x = event.clientX;
+      drag.y = event.clientY;
+      if (!dx && !dy) return;
+      if (event.cancelable) event.preventDefault();
+      if (drag.mode === "pan") this._panBy(dx, dy);
+      else this._rotateBy(dx, dy);
+    }
+
+    _onPointerUp(event) {
+      if (!this.drag) return;
+      if (event.pointerId != null && event.pointerId !== this.drag.pointerId) return;
+      const pointerId = this.drag.pointerId;
+      this.drag = null;
+      this.canvas.classList.remove("is-dragging");
+      try {
+        if (this.canvas.hasPointerCapture(pointerId)) this.canvas.releasePointerCapture(pointerId);
+      } catch (_) {}
+    }
+
+    _onDoubleClick(event) {
+      if (!this.active || !this.supported) return;
+      event.preventDefault();
+      this.resetTransform();
+    }
+
+    _rotateBy(dx, dy) {
+      this.userRotY += dx * 0.0055;
+      if (this.userRotY > Math.PI * 4) this.userRotY -= Math.PI * 4;
+      else if (this.userRotY < -Math.PI * 4) this.userRotY += Math.PI * 4;
+      this.userRotX = clamp(this.userRotX + dy * 0.0035, -1.25, 1.25);
+    }
+
+    _panBy(dx, dy) {
+      if (!this.group || !this.camera) return;
+      this.camera.updateMatrixWorld();
+      const distance = this.camera.position.distanceTo(this.group.position);
+      if (distance < 0.4) return;
+      const worldPerPixel =
+        (2 * Math.tan((this.camera.fov * Math.PI) / 360) * distance) / Math.max(1, this.height);
+      const right = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 0);
+      const up = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 1);
+      this.group.position.addScaledVector(right, dx * worldPerPixel);
+      this.group.position.addScaledVector(up, -dy * worldPerPixel);
+    }
+
+    resetTransform() {
+      this.userRotX = 0;
+      this.userRotY = 0;
+      if (this.group) {
+        this.group.position.set(0, 0, 0);
+        this.group.rotation.set(0, 0, 0);
+      }
+    }
+
     _updateUniforms() {
       const u = this.uniforms;
       u.uTime.value = this.time;
@@ -673,6 +779,17 @@
 
     destroy() {
       if (this._raf) cancelAnimationFrame(this._raf);
+      if (this.canvas) {
+        this.canvas.removeEventListener("pointerdown", this._onPointerDown);
+        this.canvas.removeEventListener("mousedown", this._onMouseDown);
+        this.canvas.removeEventListener("auxclick", this._onMouseDown);
+        this.canvas.removeEventListener("dblclick", this._onDoubleClick);
+        this.drag = null;
+        this.canvas.classList.remove("is-dragging");
+      }
+      window.removeEventListener("pointermove", this._onPointerMove);
+      window.removeEventListener("pointerup", this._onPointerUp);
+      window.removeEventListener("pointercancel", this._onPointerUp);
       if (this.points) {
         this.points.geometry.dispose();
         this.group.remove(this.points);

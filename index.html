@@ -274,6 +274,18 @@
 
       <div class="settings-divider"></div>
 
+      <section class="settings-block ripple-block">
+        <div class="setting-head">
+          <span>点击涟漪</span>
+          <button class="sphere-switch" id="rippleToggle" type="button" role="switch" aria-checked="true" aria-label="关闭点击涟漪">
+            <span></span>
+          </button>
+        </div>
+        <p class="setting-hint">在 2D 粒子最外圈及再往外约 30% 的范围内点击，像向水面投石：以落点为中心扩散同心波纹，并推开经过的粒子；范围内鼠标为手型光标，超出该范围点击无效。关闭后画布不再拦截点击。</p>
+      </section>
+
+      <div class="settings-divider"></div>
+
       <section class="settings-block">
         <div class="setting-head">
           <span>粒子颜色</span>
@@ -727,11 +739,16 @@
           </div>
           <b id="lyricsLineCountValue">5</b>
         </div>
+        <div class="lyrics-offset-field" title="负数让歌词提前，正数让歌词延后；仅对当前歌曲生效">
+          <span>歌词偏移</span>
+          <input id="lyricsOffset" type="range" min="-500" max="500" step="10" value="0" draggable="false" aria-label="歌词时间偏移，负数提前，正数延后">
+          <b id="lyricsOffsetValue">0ms</b>
+        </div>
         <div class="lyrics-pop-actions">
           <button id="lyricsReset" type="button">重置位置</button>
           <button id="lyricsClear" type="button">清除当前歌词</button>
         </div>
-        <p class="lyrics-pop-hint">拖动歌词文字可调整位置；设置自动保存。</p>
+        <p class="lyrics-pop-hint">拖动歌词文字可调整位置；「歌词偏移」可校准与人声的时间差，并按歌曲分别保存。</p>
       </div>
     </div>
     </div>
